@@ -1,8 +1,6 @@
 const https = require("https");
 const { parseStringPromise } = require("xml2js");
 
-const TIN = "426542495"; // შენი კომპანიის TIN
-
 module.exports = async (req, res) => {
   const RS_USER = process.env.RS_USER;
   const RS_PASS = process.env.RS_PASS;
@@ -11,78 +9,70 @@ module.exports = async (req, res) => {
     return res.status(500).json({ error: "RS_USER or RS_PASS missing" });
   }
 
-  // დიდი დიაპაზონი რათა ყველა ზედნადები წამოვიღოთ
-  const fromDate = "2020-01-01";
-  const toDate = "2030-12-31";
-
   try {
-    // 1) ვიღებთ ყველა შემოსული ზედნადებების სიას
-    const buyerListXML = await soapRequest(`
+    // STEP 1) შემოსული ზედნადებების სიის წამოღება
+    const listXML = await callRS(`
       <get_buyer_waybills_ex xmlns="http://tempuri.org/">
         <su>${RS_USER}</su>
         <sp>${RS_PASS}</sp>
-        <tin>${TIN}</tin>
-        <from>${fromDate}</from>
-        <to>${toDate}</to>
       </get_buyer_waybills_ex>
     `, "http://tempuri.org/get_buyer_waybills_ex");
 
-    const buyerJson = await parseStringPromise(buyerListXML, { explicitArray: true });
+    const listJSON = await parseStringPromise(listXML, { explicitArray: true });
 
     const body =
-      buyerJson["soap:Envelope"]["soap:Body"][0]["get_buyer_waybills_exResponse"][0]["get_buyer_waybills_exResult"][0];
+      listJSON["soap:Envelope"]["soap:Body"][0]["get_buyer_waybills_exResponse"][0]["get_buyer_waybills_exResult"][0];
 
     const waybills = body.Waybills?.[0]?.Waybill || [];
 
-    let result = [];
+    let final = [];
 
-    // 2) თითო ზედნადებისთვის ვიღებთ საქონლის ჩამონათვალს
-    for (const wb of waybills) {
+    // STEP 2) თითო ზედნადების საქონლის წამოღება
+    for (let wb of waybills) {
       const number = wb.WayBillNumber?.[0];
-      const date = wb.WayBillDate?.[0];
       const supplier = wb.ProviderName?.[0];
+      const date = wb.WayBillDate?.[0];
 
-      // მეორე API کالით ვიღებთ ნივთებს
-      const itemsXML = await soapRequest(`
+      // Now Fetch items
+      const goodsXML = await callRS(`
         <get_buyer_waybilll_goods_list xmlns="http://tempuri.org/">
           <su>${RS_USER}</su>
           <sp>${RS_PASS}</sp>
-          <tin>${TIN}</tin>
           <waybill_number>${number}</waybill_number>
         </get_buyer_waybilll_goods_list>
       `, "http://tempuri.org/get_buyer_waybilll_goods_list");
 
-      const itemsJSON = await parseStringPromise(itemsXML, { explicitArray: true });
+      const goodsJSON = await parseStringPromise(goodsXML, { explicitArray: true });
 
-      const goodsBody =
-        itemsJSON["soap:Envelope"]["soap:Body"][0]["get_buyer_waybilll_goods_listResponse"][0]["get_buyer_waybilll_goods_listResult"][0];
+      const gbody =
+        goodsJSON["soap:Envelope"]["soap:Body"][0]["get_buyer_waybilll_goods_listResponse"][0]["get_buyer_waybilll_goods_listResult"][0];
 
-      const goods = goodsBody.Goods?.[0]?.Good || [];
+      const goods = gbody.Goods?.[0]?.Good || [];
 
       const items = goods.map(g => ({
         barcode: g.BarCode?.[0] || "",
         name: g.Name?.[0] || "",
         qty: parseFloat(g.Quantity?.[0] || "0"),
-        price: parseFloat(g.Price?.[0] || "0")
+        price: parseFloat(g.Price?.[0] || "0"),
       }));
 
-      result.push({
-        waybill_number: number,
-        date,
-        supplier,
+      final.push({
+        waybill_number: number || "",
+        supplier: supplier || "",
+        date: date || "",
         items
       });
     }
 
-    return res.json(result);
+    return res.json(final);
 
   } catch (err) {
-    return res.status(500).json({ error: "SOAP ERROR", details: err.toString() });
+    return res.status(500).json({ error: "SOAP Error", details: err.toString() });
   }
 };
 
-// SOAP requester
-function soapRequest(innerXML, soapAction) {
+
+function callRS(innerXML, action) {
   const soapBody = `
     <soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
                    xmlns:xsd="http://www.w3.org/2001/XMLSchema"
@@ -99,14 +89,14 @@ function soapRequest(innerXML, soapAction) {
     headers: {
       "Content-Type": "text/xml; charset=utf-8",
       "Content-Length": Buffer.byteLength(soapBody),
-      "SOAPAction": soapAction
+      "SOAPAction": action
     }
   };
 
   return new Promise((resolve, reject) => {
     const req = https.request(options, res => {
       let data = "";
-      res.on("data", chunk => (data += chunk));
+      res.on("data", d => (data += d));
       res.on("end", () => resolve(data));
     });
     req.on("error", reject);
